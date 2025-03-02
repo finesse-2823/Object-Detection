@@ -11,7 +11,7 @@ from ultralytics import YOLO
 def parse_args():
     # Create our parser and parse arguments
     parser = argparse.ArgumentParser(description='YOLOv8 object detection with polygon tracking')
-    parser.add_argument('--source', type=str, default='1', help='Video source (0 for webcam, or file path)')
+    parser.add_argument('--source', type=str, default='0', help='Video source (0 for webcam, or file path)')
     parser.add_argument('--conf', type=float, default=0.25, help='Confidence threshold')
     parser.add_argument('--model', type=str, default='yolov8n.pt', help='YOLOv8 model path')
     parser.add_argument('--data', type=str, default='coco.yaml', help='Dataset config file')
