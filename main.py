@@ -5,6 +5,7 @@ import math
 from collections import defaultdict
 import argparse
 import sys
+import time
 from pathlib import Path
 from ultralytics import YOLO
 
@@ -17,10 +18,40 @@ def parse_args():
     parser.add_argument('--data', type=str, default='coco.yaml', help='Dataset config file')
     parser.add_argument('--color-threshold', type=int, default=30, help='Threshold for color similarity')
     parser.add_argument('--show', action='store_true', help='Display the detection video')
+    parser.add_argument('--debug', action='store_true', help='Enable debug messages')
     
     # Parse our args
     args, unknown = parser.parse_known_args()
     return args
+
+def debug_print(message, debug_mode=False):
+    """Print debug messages if debug mode is enabled"""
+    if debug_mode:
+        timestamp = time.strftime("%H:%M:%S", time.localtime())
+        print(f"[DEBUG {timestamp}] {message}")
+
+def get_available_cameras():
+    """List all available camera devices on the system"""
+    available_cameras = {}
+    index = 0
+    
+    while True:
+        cap = cv2.VideoCapture(index)
+        if not cap.isOpened():
+            break
+        
+        # Get camera information
+        ret, frame = cap.read()
+        if ret:
+            height, width = frame.shape[:2]
+            available_cameras[index] = f"Camera #{index} ({width}x{height})"
+        else:
+            available_cameras[index] = f"Camera #{index} (No signal)"
+        
+        cap.release()
+        index += 1
+    
+    return available_cameras
 
 def get_dominant_color(image, x1, y1, x2, y2):
     """Extract dominant color from a region using k-means clustering."""
@@ -61,15 +92,17 @@ def color_distance(color1, color2):
     """Calculate Euclidean distance between two colors."""
     return math.sqrt(sum((a - b) ** 2 for a, b in zip(color1, color2)))
 
-def group_objects_by_color(detections, frame, color_threshold=30):
+def group_objects_by_color(detections, frame, color_threshold=30, debug=False):
     """Group detected objects by their dominant color."""
     color_groups = defaultdict(list)
     
     # Check if detections is empty
     if detections is None or len(detections) == 0:
+        debug_print("No detections to group by color", debug)
         return color_groups
         
-    # Iterate through each detection - no indexing with [0]
+    # Iterate through each detection
+    debug_print(f"Grouping {len(detections)} detections by color", debug)
     for det in detections:
         x1, y1, x2, y2, conf, cls = det.tolist()
         
@@ -98,6 +131,7 @@ def group_objects_by_color(detections, frame, color_threshold=30):
             center_y = (y1 + y2) / 2
             color_groups[dominant_color].append((center_x, center_y, cls))
     
+    debug_print(f"Created {len(color_groups)} color groups", debug)
     return color_groups
 
 def point_in_polygon(point, polygon):
@@ -120,9 +154,11 @@ def point_in_polygon(point, polygon):
     
     return inside
 
-def visualize_frame(frame, detections, active_polygons, objects_in_polygons, class_names):
+def visualize_frame(frame, detections, active_polygons, objects_in_polygons, class_names, debug=False):
     """Draw detection boxes, polygons and labels on the frame."""
     # Draw all active polygons
+    debug_print(f"Visualizing frame with {len(active_polygons)} polygons and {len(detections)} detections", debug)
+    
     for poly_id, (vertices, color) in active_polygons.items():
         # Convert vertices to numpy array for drawing
         vertices_np = np.array(vertices, np.int32)
@@ -167,9 +203,16 @@ def visualize_frame(frame, detections, active_polygons, objects_in_polygons, cla
             cv2.putText(frame, label, (int(x1), int(y1)-5), 
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 2)
     
+    # Add camera switch instructions
+    cv2.putText(frame, "Press 0-9 to switch cameras", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+    
     return frame
 
 def run_detection(args):
+    debug = args.debug
+    debug_print("Starting object detection application", debug)
+    
     # Ensure model and data files exist
     model_path = Path(args.model)
     
@@ -179,32 +222,43 @@ def run_detection(args):
     # Load YOLOv8 model with GPU acceleration if available
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     
+    debug_print(f"Loading YOLOv8 model from {args.model} on {device}", debug)
     # Add this option to prevent YOLO from parsing command line arguments
     model = YOLO(args.model, task='detect')
     print(f"Running on device: {device}")
     
     # Get class names from model
     class_names = model.names
+    debug_print(f"Loaded model with {len(class_names)} classes", debug)
+    
+    # Get list of available cameras
+    available_cameras = get_available_cameras()
+    debug_print(f"Available cameras: {available_cameras}", debug)
+    print("Available cameras:")
+    for cam_id, cam_info in available_cameras.items():
+        print(f"  {cam_id}: {cam_info}")
     
     # Open video capture
-    source = args.source
-    if source.isdigit():
-        source = int(source)  # Convert string to integer for webcam
+    current_source = args.source
+    if current_source.isdigit():
+        current_source = int(current_source)  # Convert string to integer for webcam
+    
+    debug_print(f"Opening video source: {current_source}", debug)
     
     # Try multiple times to open camera (sometimes it fails on first try)
     max_attempts = 3
     for attempt in range(max_attempts):
-        cap = cv2.VideoCapture(source)
+        cap = cv2.VideoCapture(current_source)
         if cap.isOpened():
             break
-        print(f"Attempt {attempt+1}/{max_attempts} to open video source failed. Retrying...")
+        debug_print(f"Attempt {attempt+1}/{max_attempts} to open video source failed. Retrying...", debug)
         cv2.waitKey(1000)  # Wait 1 second between attempts
     
     if not cap.isOpened():
-        print(f"Error: Could not open video source {source} after {max_attempts} attempts")
+        print(f"Error: Could not open video source {current_source} after {max_attempts} attempts")
         return
     
-    print(f"Successfully opened video source: {source}")
+    print(f"Successfully opened video source: {current_source}")
     
     # Objects currently inside polygons (polygon_id: {object_id: (center_x, center_y, class_id)})
     objects_in_polygons = defaultdict(dict)
@@ -216,30 +270,44 @@ def run_detection(args):
     # Track processing performance
     frame_count = 0
     start_time = cv2.getTickCount()
+    last_camera_switch_time = 0  # To prevent too frequent camera switches
     
-    print("Starting detection loop. Press 'q' to quit.")
+    print("Starting detection loop. Press 'q' to quit. Press 0-9 to switch cameras.")
     
     while True:
         ret, frame = cap.read()
         if not ret:
-            print("End of video stream or error reading frame.")
-            break
+            debug_print("End of video stream or error reading frame", debug)
+            
+            # Try to reconnect to the camera
+            debug_print("Attempting to reconnect to the camera...", debug)
+            cap.release()
+            cap = cv2.VideoCapture(current_source)
+            if not cap.isOpened():
+                print("Failed to reconnect to the camera. Exiting.")
+                break
+            
+            continue
         
         frame_count += 1
         
         # Run YOLOv8 detection
+        debug_print(f"Processing frame {frame_count}", debug)
         results = model(frame, conf=args.conf, verbose=False)
         
         # Extract detections - properly access boxes
         if results and len(results) > 0 and hasattr(results[0], 'boxes'):
             # Extract the tensor directly without assuming batch dimension
             detections = results[0].boxes.data
+            if len(detections) > 0:
+                debug_print(f"Found {len(detections)} detections in frame", debug)
         else:
-            print(f"Frame {frame_count}: No valid detections found.")
+            if frame_count % 30 == 0:  # Don't log this too frequently
+                debug_print(f"Frame {frame_count}: No valid detections found", debug)
             detections = torch.zeros((0, 6))  # Empty tensor with correct shape
             
         # Group detected objects by color
-        color_groups = group_objects_by_color(detections, frame, args.color_threshold)
+        color_groups = group_objects_by_color(detections, frame, args.color_threshold, debug)
         
         # Process each color group to find polygons
         for color, points in color_groups.items():
@@ -253,11 +321,13 @@ def run_detection(args):
                 for poly_id, (poly_vertices, poly_color) in list(active_polygons.items()):
                     if color_distance(color, poly_color) < args.color_threshold:
                         active_polygons[poly_id] = (vertices, color)
+                        debug_print(f"Updated polygon {poly_id} with {len(vertices)} vertices", debug)
                         polygon_exists = True
                         break
                 
                 if not polygon_exists:
                     active_polygons[polygon_counter] = (vertices, color)
+                    debug_print(f"Created new polygon {polygon_counter} with {len(vertices)} vertices", debug)
                     polygon_counter += 1
         
         # Track objects inside/outside this polygon
@@ -290,6 +360,12 @@ def run_detection(args):
                 
                 # If the object is inside, track it
                 if is_inside:
+                    # Check if this is a new object entering the polygon
+                    if object_id not in objects_in_polygons[poly_id]:
+                        cls_id = int(cls)
+                        object_class = class_names[cls_id] if cls_id < len(class_names) else f"class_{cls_id}"
+                        debug_print(f"New {object_class} entered zone {poly_id}", debug)
+                    
                     objects_in_polygons[poly_id][object_id] = (center_x, center_y, cls)
                     current_objects.add(object_id)
             
@@ -303,25 +379,58 @@ def run_detection(args):
                     del objects_in_polygons[poly_id][object_id]
         
         # Calculate and display FPS
-        if frame_count % 10 == 0:
+        if frame_count % 30 == 0:  # Update less frequently to reduce console output
             current_time = cv2.getTickCount()
             elapsed_time = (current_time - start_time) / cv2.getTickFrequency()
             if elapsed_time > 0:  # Prevent division by zero
                 fps = frame_count / elapsed_time
-                print(f"Processing speed: {fps:.1f} FPS")
+                debug_print(f"Processing speed: {fps:.1f} FPS", debug)
         
         if args.show:
             # Visualize the results
             vis_frame = visualize_frame(frame.copy(), detections, active_polygons, 
-                                      objects_in_polygons, class_names)
+                                      objects_in_polygons, class_names, debug)
+            
+            # Display camera information
+            cam_info = f"Source: {current_source}"
+            if isinstance(current_source, int) and current_source in available_cameras:
+                cam_info = available_cameras[current_source]
+            cv2.putText(vis_frame, cam_info, (10, frame.shape[0] - 10), 
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
             
             # Display the frame
             cv2.imshow('Object Detection with Polygon Tracking', vis_frame)
             
+            # Handle key presses
+            key = cv2.waitKey(1) & 0xFF
+            
             # Break the loop if 'q' is pressed
-            if cv2.waitKey(1) & 0xFF == ord('q'):
-                print("User quit the application.")
+            if key == ord('q'):
+                debug_print("User quit the application", debug)
                 break
+                
+            # Switch camera if a number key is pressed (0-9)
+            current_time = time.time()
+            if current_time - last_camera_switch_time > 1.0:  # Prevent too frequent switches
+                if ord('0') <= key <= ord('9'):
+                    camera_id = key - ord('0')
+                    if camera_id in available_cameras:
+                        debug_print(f"Switching to camera {camera_id}", debug)
+                        # Release current camera
+                        cap.release()
+                        # Open new camera
+                        cap = cv2.VideoCapture(camera_id)
+                        current_source = camera_id
+                        if cap.isOpened():
+                            print(f"Switched to camera {camera_id}: {available_cameras[camera_id]}")
+                        else:
+                            print(f"Failed to open camera {camera_id}")
+                            # Try to reopen the previous camera
+                            cap = cv2.VideoCapture(current_source)
+                    else:
+                        debug_print(f"Camera {camera_id} not available", debug)
+                    
+                    last_camera_switch_time = current_time
     
     # Release resources
     cap.release()
