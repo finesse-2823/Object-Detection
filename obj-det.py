@@ -3,12 +3,28 @@ from ultralytics import YOLO
 import threading
 import playsound
 import time
+import torch
 
 class MouseDetector:
     def __init__(self):
-        # Initialize YOLO model
-        self.model = YOLO('yolov8n.pt')  # Using YOLOv8 nano model
-        self.confidence_threshold = 0.20  # Lowered threshold for better detection
+        # Initialize YOLO model - Upgraded to YOLOv8s for better accuracy
+        self.model = YOLO('yolov8s.pt')  # Changed from yolov8n.pt to yolov8s.pt
+        
+        # Force GPU usage if available
+        if torch.cuda.is_available():
+            self.model.to('cuda')
+            print("Using GPU acceleration with CUDA")
+        else:
+            print("CUDA not available, using CPU")
+        
+        # Optimize model for inference
+        try:
+            self.model.fuse()  # Fuse Conv2d and BatchNorm2d layers for speed
+            print("Model layers fused for optimization")
+        except Exception as e:
+            print(f"Could not fuse model layers: {e}")
+        
+        self.confidence_threshold = 0.3  # Increased from 0.01 for better accuracy with YOLOv8s
         self.mouse_class_id = 64  # Correct mouse class ID in COCO dataset (64 is for mouse)
         self.cup_class_id = 41  # Correct cup class ID in COCO dataset (41 is for cup)
         self.red_box = None  # To store the current red box coordinates
@@ -16,8 +32,16 @@ class MouseDetector:
         self.sound_stop_event = threading.Event()  # Event to signal when to stop the sound
 
     def detect_mice(self, frame):
-        # Perform detection
-        results = self.model(frame)
+        # Optimize frame size for better performance on GTX 1650
+        height, width = frame.shape[:2]
+        if width > 640:
+            scale = 640 / width
+            new_width = 640
+            new_height = int(height * scale)
+            frame = cv2.resize(frame, (new_width, new_height))
+
+        # Perform detection with optimized settings
+        results = self.model(frame, imgsz=640, conf=self.confidence_threshold, verbose=False)
 
         # Initialize list to store mouse detections
         mouse_detections = []
@@ -25,23 +49,24 @@ class MouseDetector:
 
         for result in results:
             boxes = result.boxes
-            for box in boxes:
-                # Check if detection is a mouse
-                if int(box.cls) == self.mouse_class_id and box.conf > self.confidence_threshold:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf)
-                    mouse_detections.append({
-                        'bbox': (int(x1), int(y1), int(x2), int(y2)),
-                        'confidence': conf
-                    })
-                # Check if detection is a cup
-                elif int(box.cls) == self.cup_class_id and box.conf > self.confidence_threshold:
-                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                    conf = float(box.conf)
-                    cup_detections.append({
-                        'bbox': (int(x1), int(y1), int(x2), int(y2)),
-                        'confidence': conf
-                    })
+            if boxes is not None:  # Check if any detections exist
+                for box in boxes:
+                    # Check if detection is a mouse
+                    if int(box.cls) == self.mouse_class_id and box.conf > self.confidence_threshold:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        conf = float(box.conf)
+                        mouse_detections.append({
+                            'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                            'confidence': conf
+                        })
+                    # Check if detection is a cup
+                    elif int(box.cls) == self.cup_class_id and box.conf > self.confidence_threshold:
+                        x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
+                        conf = float(box.conf)
+                        cup_detections.append({
+                            'bbox': (int(x1), int(y1), int(x2), int(y2)),
+                            'confidence': conf
+                        })
 
         # Limit to four mice detections
         mouse_detections = sorted(mouse_detections, key=lambda x: x['confidence'], reverse=True)[:4]
@@ -139,14 +164,14 @@ class MouseDetector:
         for detection in mouse_detections:
             x1, y1, x2, y2 = detection['bbox']
             cv2.rectangle(frame, (x1, y1), (x2, y2), (255, 0, 0), 2)  # Blue box
-            conf_text = f"{detection['confidence']:.2f}"
+            conf_text = f"Mouse: {detection['confidence']:.2f}"  # Added label for clarity
             cv2.putText(frame, conf_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (255, 0, 0), 2)
 
         # Draw cup detections in green
         for cup in cup_detections:
             x1, y1, x2, y2 = cup['bbox']
             cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)  # Green box
-            conf_text = f"{cup['confidence']:.2f}"
+            conf_text = f"Cup: {cup['confidence']:.2f}"  # Added label for clarity
             cv2.putText(frame, conf_text, (x1, y1 - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
         red_box = None
@@ -198,6 +223,10 @@ def main():
         print("Error: Could not open video capture device")
         return
 
+    # Add FPS counter for performance monitoring
+    fps_counter = 0
+    start_time = time.time()
+
     while True:
         ret, frame = cap.read()
         if not ret:
@@ -210,8 +239,15 @@ def main():
         # Draw detections on frame
         frame = detector.draw_detections(frame, mouse_detections, cup_detections)
 
+        # Display FPS
+        fps_counter += 1
+        if fps_counter % 30 == 0:  # Update FPS every 30 frames
+            elapsed_time = time.time() - start_time
+            fps = fps_counter / elapsed_time
+            print(f"Current FPS: {fps:.1f}")
+
         # Display the frame
-        cv2.imshow('Mouse & Cup Detection', frame)
+        cv2.imshow('Mouse & Cup Detection - YOLOv8s', frame)
 
         # Break loop on 'q' press
         if cv2.waitKey(1) & 0xFF == ord('q'):
